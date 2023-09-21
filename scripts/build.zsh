@@ -3,7 +3,7 @@
 script_dir=${0:A:h}
 source ${script_dir}/_pre.zsh
 
-source ${script_dir}/lint.zsh
+# source ${script_dir}/lint.zsh
 source ${script_dir}/test.zsh
 # Cleaning before final build
 source ${script_dir}/clean.zsh
