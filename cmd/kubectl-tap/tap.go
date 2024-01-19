@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,23 +40,29 @@ import (
 	appsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+	"k8s.io/client-go/util/homedir"
 	"k8s.io/client-go/util/retry"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
 const (
-	kubetapContainerName         = "kubetap"
-	kubetapServicePortName       = "kubetap-web"
-	kubetapPortName              = "kubetap-listen"
-	kubetapWebPortName           = "kubetap-web"
-	kubetapProxyListenPort       = 7777
-	kubetapProxyWebInterfacePort = 2244
-	kubetapConfigMapPrefix       = "kubetap-target-"
+	kubetapContainerName          = "kubetap"
+	kubetapServicePortName        = "kubetap-web"
+	kubetapPortName               = "kubetap-listen"
+	kubetapWebPortName            = "kubetap-web"
+	kubetapReverseProxyListenPort = 7776
+	kubetapProxyListenPort        = 7777
+	kubetapProxyWebInterfacePort  = 2244
 
-	interactiveTimeoutSeconds = 90
+	kubetapForwarProxyWebInterfacePort = 2245
+
+	kubetapConfigMapPrefix = "kubetap-target-"
+
+	interactiveTimeoutSeconds = 180
 	configMapAnnotationPrefix = "target-"
 
 	protocolHTTP Protocol = "http"
@@ -92,6 +99,8 @@ type Tap interface {
 	// during the tap process.
 	// Example: mitmproxy calls this function to configure the ConfigMap volume refs.
 	PatchDeployment(*k8sappsv1.Deployment)
+
+	UnPatchDeployment(*k8sappsv1.Deployment)
 
 	// ReadyEnv and UnreadyEnv are used to prepare the environment
 	// with resources that will be necessary for the sidecar, but do
@@ -131,7 +140,7 @@ type ProxyOptions struct {
 // NewListCommand lists Services that are already tapped.
 func NewListCommand(client kubernetes.Interface, viper *viper.Viper) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		namespace := viper.GetString("namespace")
+		namespace := getCurrentNamespace()
 		exists, err := hasNamespace(client, namespace)
 		if err != nil {
 			// this is the one case where we allow an empty namespace string
@@ -179,32 +188,33 @@ func NewListCommand(client kubernetes.Interface, viper *viper.Viper) func(*cobra
 
 // NewTapCommand identifies a target employment through service selectors and modifies that
 // deployment to add a proxy sidecar.
-func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *viper.Viper) func(*cobra.Command, []string) error { //nolint: gocyclo
+func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *viper.Viper) func(*cobra.Command, []string) error { // nolint: gocyclo
 	return func(cmd *cobra.Command, args []string) error {
 		targetSvcName := args[0]
 
 		protocol := viper.GetString("protocol")
 		targetSvcPort := viper.GetInt32("proxyPort")
 		namespace := viper.GetString("namespace")
-		image := viper.GetString("proxyImage")
+		image := defaultImageHTTP
 		https := viper.GetBool("https")
 		portForward := viper.GetBool("portForward")
 		openBrowser := viper.GetBool("browser")
 
-		if openBrowser {
-			portForward = true
-		}
-		commandArgs := strings.Fields(viper.GetString("commandArgs"))
-		if targetSvcPort == 0 {
-			return fmt.Errorf("--port flag not provided")
-		}
+		// if openBrowser {
+		// 	portForward = true
+		// }
+
+		portForward = true
+
+		// commandArgs := strings.Fields(viper.GetString("commandArgs"))
 		if namespace == "" {
 			// TODO: There is probably a way to get the default namespace from the
 			// client context, but I'm not sure what that API is. Will dig
 			// for that at some point.
 			// BUG: "default" is not always the "correct default".
-			viper.Set("namespace", "default")
-			namespace = "default"
+
+			namespace = getCurrentNamespace()
+			viper.Set("namespace", namespace)
 		}
 		exists, err := hasNamespace(client, namespace)
 		if err != nil {
@@ -248,6 +258,17 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 		anns := targetService.GetAnnotations()
 		if anns[annotationOriginalTargetPort] != "" {
 			return ErrServiceTapped
+		}
+
+		if targetSvcPort == 0 {
+			for _, ports := range targetService.Spec.Ports {
+				targetSvcPort = ports.Port
+				break
+			}
+		}
+
+		if targetSvcPort == 0 {
+			return fmt.Errorf("--port flag not provided and no ports found on Service %q", targetSvcName)
 		}
 
 		// set the upstream port so the proxy knows where to forward traffic
@@ -294,7 +315,7 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 		case protocolGRPC:
 		default:
 			// AKA, case protocolHTTP:
-			proxy = NewMitmproxy(client, proxyOpts)
+			proxy = NewMitmproxy(client, proxyOpts, ModeReverse)
 		}
 
 		// Prepare the environment (configmaps, secrets, volumes, etc).
@@ -314,11 +335,11 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 
 		sidecar := proxy.Sidecar(dpl.Name)
 		sidecar.Image = image
-		sidecar.Args = commandArgs
+		sidecar.Args = []string{"mitmweb"}
 
 		// Apply the Deployment configuration
 		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			dpl.Spec.Template.Spec.Containers = append(dpl.Spec.Template.Spec.Containers, sidecar)
+			dpl.Spec.Template.Spec.Containers = append([]v1.Container{sidecar}, dpl.Spec.Template.Spec.Containers...)
 			proxy.PatchDeployment(&dpl)
 			// set annotation on pod to know what pods are tapped
 			anns := dpl.Spec.Template.GetAnnotations()
@@ -380,7 +401,7 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 		go func() {
 			// Skip the first few checks to give pods time to come up.
 			// Race: If the first few cycles are not skipped, the condition status may be "Ready".
-			time.Sleep(5 * time.Second)
+			time.Sleep(20 * time.Second)
 			s <- struct{}{}
 		}()
 		bar := progressbar.NewOptions(interactiveTimeoutSeconds,
@@ -456,13 +477,13 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 		fw, err := portforward.New(dialer,
 			[]string{
 				fmt.Sprintf("%s:%s", strconv.Itoa(kubetapProxyWebInterfacePort), strconv.Itoa(kubetapProxyWebInterfacePort)),
-				fmt.Sprintf("%s:%s", "4000", strconv.Itoa(int(kubetapProxyListenPort))),
+				fmt.Sprintf("%s:%s", "4000", strconv.Itoa(int(kubetapReverseProxyListenPort))),
 			}, stopCh, readyCh, bout, berr)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "\nPort-Forwards:\n\n")
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s - http://127.0.0.1:%s\n", proxy.String(), strconv.Itoa(int(kubetapProxyWebInterfacePort)))
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s - http://127.0.0.1:%s\n", "Web Portal", strconv.Itoa(int(kubetapProxyWebInterfacePort)))
 		if https {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s - https://127.0.0.1:%s\n\n", targetSvcName, "4000")
 		} else {
@@ -472,10 +493,11 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 			go func() {
 				time.Sleep(2 * time.Second)
 				_ = browser.OpenURL("http://127.0.0.1:" + strconv.Itoa(int(kubetapProxyWebInterfacePort)))
+				time.Sleep(2 * time.Second)
 				if https {
-					_ = browser.OpenURL("https://127.0.0.1:" + "4000")
+					_ = browser.OpenURL("https://127.0.0.1:" + "4000" + "/_/status")
 				} else {
-					_ = browser.OpenURL("http://127.0.0.1:" + "4000")
+					_ = browser.OpenURL("http://127.0.0.1:" + "4000" + "/_/status")
 				}
 			}()
 		}
@@ -497,7 +519,8 @@ func NewUntapCommand(client kubernetes.Interface, viper *viper.Viper) func(*cobr
 		targetSvcName := args[0]
 		namespace := viper.GetString("namespace")
 		if namespace == "" {
-			namespace = "default"
+			namespace = getCurrentNamespace()
+			viper.Set("namespace", namespace)
 		}
 		exists, err := hasNamespace(client, namespace)
 		if err != nil {
@@ -526,7 +549,7 @@ func NewUntapCommand(client kubernetes.Interface, viper *viper.Viper) func(*cobr
 			Namespace: namespace,
 			Target:    targetSvcName,
 			dplName:   dpl.Name,
-		})
+		}, ModeReverse)
 
 		if err := proxy.UnreadyEnv(); err != nil {
 			// both error types below can be thrown
@@ -548,6 +571,9 @@ func NewUntapCommand(client kubernetes.Interface, viper *viper.Viper) func(*cobr
 				}
 			}
 			deployment.Spec.Template.Spec.Containers = containersNoProxy
+
+			proxy.UnPatchDeployment(deployment)
+
 			var volumes []v1.Volume
 			for _, v := range deployment.Spec.Template.Spec.Volumes {
 				if !strings.HasPrefix(v.Name, "kubetap") {
@@ -675,7 +701,7 @@ func tapSvc(svcClient corev1.ServiceInterface, svcName string, targetPort int32)
 				if sp.Name == "" {
 					sp.Name = kubetapPortName
 				}
-				sp.TargetPort = intstr.FromInt(kubetapProxyListenPort)
+				sp.TargetPort = intstr.FromInt(kubetapReverseProxyListenPort)
 			}
 			servicePorts = append(servicePorts, sp)
 		}
@@ -704,7 +730,7 @@ func untapSvc(svcClient corev1.ServiceInterface, svcName string) error {
 			if sp.Name == kubetapServicePortName {
 				continue
 			}
-			if sp.TargetPort.IntValue() == kubetapProxyListenPort {
+			if sp.TargetPort.IntValue() == kubetapReverseProxyListenPort {
 				if sp.Name == kubetapPortName {
 					sp.Name = ""
 				}
@@ -732,17 +758,29 @@ func untapSvc(svcClient corev1.ServiceInterface, svcName string) error {
 
 // hasNamespace checks if a given Namespace exists.
 func hasNamespace(client kubernetes.Interface, namespace string) (bool, error) {
-	if namespace == "" {
-		return false, os.ErrInvalid
+	return true, nil
+}
+
+// Get the default namespace specified in the KUBECONFIG file current context
+func getCurrentNamespace() string {
+	kubeConfig := ""
+
+	home := homedir.HomeDir()
+	if home == "" {
+		return "default"
 	}
-	ns, err := client.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+
+	kubeConfig = filepath.Join(home, ".kube", "config")
+
+	config, err := clientcmd.LoadFromFile(kubeConfig)
 	if err != nil {
-		return false, err
+		panic(err.Error())
 	}
-	for _, n := range ns.Items {
-		if n.Name == namespace {
-			return true, nil
-		}
+	ns := config.Contexts[config.CurrentContext].Namespace
+
+	if len(ns) == 0 {
+		ns = "default"
 	}
-	return false, nil
+
+	return ns
 }

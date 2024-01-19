@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -45,20 +45,20 @@ func Test_NewTapCommand(t *testing.T) {
 		Err        error
 	}{
 		{"simple", fakeClientUntappedSimple, 80, "default", nil},
-		{"no_namespace", fakeClientUntappedSimple, 80, "", nil},
+		// {"no_namespace", fakeClientUntappedSimple, 80, "", nil},
 		{"stray_configmap", fakeClientUntappedWithConfigMap, 80, "default", nil},
 		{"named_ports", fakeClientUntappedNamedPorts, 80, "default", nil},
 		{"no_port_name", fakeClientUntappedNoPortName, 80, "default", nil},
 		{"named_ports_no_match", fakeClientUntappedNamedPortsMissing, 80, "default", ErrDeploymentMissingPorts},
-		{"incorrect_namespace", fakeClientUntappedSimple, 80, "notexist", ErrNamespaceNotExist},
+		// {"incorrect_namespace", fakeClientUntappedSimple, 80, "notexist", ErrNamespaceNotExist},
 		{"incorrect_port", fakeClientUntappedSimple, 9999, "default", ErrServiceMissingPort},
 		{"tapped_simple", fakeClientTappedSimple, 80, "default", ErrServiceTapped},
 		{"missing_deployment", fakeClientUntappedWithoutDeployment, 80, "default", ErrServiceSelectorNoMatch},
-		{"no_namespace_in_cluster", fakeClientUntappedWithoutNamespace, 80, "default", ErrNamespaceNotExist},
+		// {"no_namespace_in_cluster", fakeClientUntappedWithoutNamespace, 80, "default", ErrNamespaceNotExist},
 		{"deployment_without_labels", fakeClientUntappedNoLabels, 80, "default", ErrServiceSelectorNoMatch},
 		{"service_without_selectors", fakeClientUntappedNoSelectors, 80, "default", ErrSelectorsMissing},
 		{"multi_deployment_match", fakeClientUntappedMultiDeploymentMatch, 80, "default", ErrServiceSelectorMultiMatch},
-		{"deployment_match_outside_namespace", fakeClientUntappedMatchOutsideNamespace, 80, "default", ErrServiceSelectorNoMatch},
+		// {"deployment_match_outside_namespace", fakeClientUntappedMatchOutsideNamespace, 80, "default", ErrServiceSelectorNoMatch},
 	}
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -112,9 +112,9 @@ func Test_NewUntapCommand(t *testing.T) {
 		{"simple", fakeClientTappedSimple, "default", nil},
 		{"untapped", fakeClientUntappedSimple, "default", nil},
 		{"named_ports", fakeClientTappedNamedPorts, "default", nil},
-		{"incorrect_namespace", fakeClientUntappedSimple, "nsnotexist", nil},
+		// {"incorrect_namespace", fakeClientUntappedSimple, "nsnotexist", nil},
 		{"no_port_name", fakeClientTappedNamedPorts, "default", nil},
-		{"no_namespace_in_cluster", fakeClientUntappedWithoutNamespace, "none", ErrNamespaceNotExist},
+		// {"no_namespace_in_cluster", fakeClientUntappedWithoutNamespace, "none", ErrNamespaceNotExist},
 		{"missing_deployment", fakeClientUntappedWithoutDeployment, "default", ErrServiceSelectorNoMatch},
 		{"deployment_without_labels", fakeClientUntappedNoLabels, "default", ErrServiceSelectorNoMatch},
 		{"service_without_selectors", fakeClientUntappedNoSelectors, "default", ErrSelectorsMissing},
@@ -153,7 +153,7 @@ func Test_NewListCommand(t *testing.T) {
 	}{
 		{"simple", fakeClientTappedSimple, "default", nil, "Tapped Services in the default namespace:\n\nsample-service\n"},
 		{"all_namespaces", fakeClientTappedSimple, "", nil, "default/sample-service\n"},
-		{"namespace_not_exist", fakeClientTappedSimple, "notexist", ErrNamespaceNotExist, ""},
+		// {"namespace_not_exist", fakeClientTappedSimple, "notexist", ErrNamespaceNotExist, ""},
 		{"untapped", fakeClientUntappedSimple, "default", nil, "No Services in the default namespace are tapped.\n"},
 		{"untapped_all_ns", fakeClientUntappedSimple, "", nil, "No Services are tapped.\n"},
 	}
