@@ -15,9 +15,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
@@ -154,7 +156,7 @@ func (m *Mitmproxy) Sidecar(deploymentName string) v1.Container {
 }
 
 // PatchDeployment provides any necessary tweaks to the deployment after the sidecar is added.
-func (m *Mitmproxy) PatchDeployment(deployment *k8sappsv1.Deployment) {
+func (m *Mitmproxy) PatchDeployment(deployment *k8sappsv1.Deployment) error {
 	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, v1.Volume{
 		Name: kubetapConfigMapPrefix + deployment.Name,
 		VolumeSource: v1.VolumeSource{
@@ -209,18 +211,6 @@ func (m *Mitmproxy) PatchDeployment(deployment *k8sappsv1.Deployment) {
 		// 		v1.ResourceMemory: resource.MustParse("64Mi"),
 		// 	},
 		// }
-
-		deployment.Spec.Template.Spec.Containers[i].Env = append(
-			deployment.Spec.Template.Spec.Containers[i].Env,
-			v1.EnvVar{
-				Name:  "http_proxy",
-				Value: "http://localhost:7777",
-			},
-			v1.EnvVar{
-				Name:  "https_proxy",
-				Value: "http://localhost:7777",
-			})
-
 		deployment.Spec.Template.Spec.Containers[i].Lifecycle = &v1.Lifecycle{
 			PostStart: &v1.LifecycleHandler{
 				Exec: &v1.ExecAction{
@@ -230,22 +220,41 @@ func (m *Mitmproxy) PatchDeployment(deployment *k8sappsv1.Deployment) {
 				},
 			},
 		}
+
+		// Patch env
+		if m.ProxyOpts.EnvOverrides == nil {
+			m.ProxyOpts.EnvOverrides = make(map[string]string)
+		}
+		m.ProxyOpts.EnvOverrides["http_proxy"] = "http://localhost:7777"
+		m.ProxyOpts.EnvOverrides["https_proxy"] = "http://localhost:7777"
+
+		var annotations []int
+
+		for key, value := range m.ProxyOpts.EnvOverrides {
+			annotations = append(annotations, len(deployment.Spec.Template.Spec.Containers[i].Env))
+			deployment.Spec.Template.Spec.Containers[i].Env = append(deployment.Spec.Template.Spec.Containers[i].Env, v1.EnvVar{
+				Name:  key,
+				Value: value,
+			})
+			fmt.Printf("Tapping env: %s=%s\n", key, value)
+		}
+
+		annotationString, err := json.Marshal(annotations)
+		if err != nil {
+			return err
+		}
+
+		deployment.Annotations[annotationEnvironmentPrefix+"-"+deployment.Name+"-"+deployment.Spec.Template.Spec.Containers[i].Name] = string(annotationString)
 	}
+
+	return nil
 }
 
-func (m *Mitmproxy) UnPatchDeployment(deployment *k8sappsv1.Deployment) {
+func (m *Mitmproxy) UnPatchDeployment(deployment *k8sappsv1.Deployment) error {
 	for i := range deployment.Spec.Template.Spec.Containers {
 		if deployment.Spec.Template.Spec.Containers[i].Name == kubetapContainerName {
 			continue
 		}
-
-		var envs []v1.EnvVar
-		for j := range deployment.Spec.Template.Spec.Containers[i].Env {
-			if !strings.HasSuffix(deployment.Spec.Template.Spec.Containers[i].Env[j].Name, "_proxy") {
-				envs = append(envs, deployment.Spec.Template.Spec.Containers[i].Env[j])
-			}
-		}
-		deployment.Spec.Template.Spec.Containers[i].Env = envs
 
 		var mounts []v1.VolumeMount
 		for j := range deployment.Spec.Template.Spec.Containers[i].VolumeMounts {
@@ -270,6 +279,40 @@ func (m *Mitmproxy) UnPatchDeployment(deployment *k8sappsv1.Deployment) {
 		volumes = append(volumes, deployment.Spec.Template.Spec.Volumes[i])
 	}
 	deployment.Spec.Template.Spec.Volumes = volumes
+
+	// UnPatch env
+
+	anns := deployment.GetAnnotations()
+	for i := range deployment.Spec.Template.Spec.Containers {
+		annoKey := annotationEnvironmentPrefix + "-" + deployment.Name + "-" + deployment.Spec.Template.Spec.Containers[i].Name
+		for key := range anns {
+			if key != annoKey {
+				continue
+			}
+		}
+
+		var annoEnv []int
+		err := json.Unmarshal([]byte(anns[annoKey]), &annoEnv)
+		if err != nil {
+			return err
+		}
+		var newEnv []v1.EnvVar
+
+		// Remove the env vars that index in annoEnv
+		for j := range deployment.Spec.Template.Spec.Containers[i].Env {
+			if slices.Contains(annoEnv, j) {
+				fmt.Printf("Untapping env: %s=%s\n", deployment.Spec.Template.Spec.Containers[i].Env[j].Name, deployment.Spec.Template.Spec.Containers[i].Env[j].Value)
+				continue
+			}
+			newEnv = append(newEnv, deployment.Spec.Template.Spec.Containers[i].Env[j])
+		}
+
+		deployment.Spec.Template.Spec.Containers[i].Env = newEnv
+		delete(anns, annoKey)
+	}
+	deployment.Spec.Template.SetAnnotations(anns)
+
+	return nil
 }
 
 // Protocols returns a slice of protocols supported by Mitmproxy, currently only HTTP.

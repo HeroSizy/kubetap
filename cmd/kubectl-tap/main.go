@@ -16,6 +16,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -36,6 +37,7 @@ const (
 	annotationConfigMap          = "kubetap.io/proxy-config"
 	annotationIsTapped           = "kubetap.io/tapped"
 	annotationSecret             = "kubetap.io/secret"
+	annotationEnvironmentPrefix  = "kubetap.io/env"
 
 	// defaultImageHTTP = "gcr.io/soluble-oss/kubetap-mitmproxy:latest"
 	defaultImageHTTP = "sizengyuspd/mitmproxy:latest"
@@ -80,6 +82,7 @@ func main() {
 	onCmd.Flags().Bool("port-forward", false, `enable to automatically kubctl port-forward to services`)
 	onCmd.Flags().Bool("browser", false, "enable to open browser windows to service and proxy. Also enables --port-forward")
 	onCmd.Flags().String("protocol", "http", "specify a protocol. Supported protocols: [ http ]")
+	onCmd.Flags().String("env", "", "specify environment variables to be passed to the proxied container. Format: --env=KEY1=VALUE1,KEY2=VALUE2")
 
 	rootCmd.AddCommand(versionCmd, onCmd, offCmd, listCmd)
 
@@ -111,6 +114,25 @@ func bindTapFlags(cmd *cobra.Command, _ []string) error {
 	if err := viper.BindPFlag("protocol", cmd.Flags().Lookup("protocol")); err != nil {
 		return err
 	}
+
+	envF := cmd.Flags().Lookup("env")
+
+	var envMap map[string]string
+
+	if envF.Value.String() != "" {
+		envMap = make(map[string]string)
+		envPairs := strings.Split(envF.Value.String(), ",")
+		for _, envPair := range envPairs {
+			pair := strings.Split(envPair, "=")
+			if len(pair) != 2 {
+				return fmt.Errorf("invalid env pair: %s", envPair)
+			}
+			envMap[pair[0]] = pair[1]
+		}
+
+	}
+	viper.Set("env", envMap)
+
 	return nil
 }
 

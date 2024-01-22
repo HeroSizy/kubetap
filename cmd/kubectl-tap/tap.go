@@ -98,9 +98,9 @@ type Tap interface {
 	// PatchDeployment tweaks a Deployment after a Sidecar is added
 	// during the tap process.
 	// Example: mitmproxy calls this function to configure the ConfigMap volume refs.
-	PatchDeployment(*k8sappsv1.Deployment)
+	PatchDeployment(*k8sappsv1.Deployment) error
 
-	UnPatchDeployment(*k8sappsv1.Deployment)
+	UnPatchDeployment(*k8sappsv1.Deployment) error
 
 	// ReadyEnv and UnreadyEnv are used to prepare the environment
 	// with resources that will be necessary for the sidecar, but do
@@ -132,6 +132,8 @@ type ProxyOptions struct {
 	Namespace string `json:"namespace"`
 	// Image is the proxy image to deploy as a sidecar
 	Image string `json:"image"`
+
+	EnvOverrides map[string]string `json:"env_overrides"`
 
 	// dplName tracks the current deployment target
 	dplName string
@@ -229,6 +231,7 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 			UpstreamHTTPS: https,
 			Mode:          "reverse", // eventually this may be configurable
 			Namespace:     namespace,
+			EnvOverrides:  viper.GetStringMapString("env"),
 		}
 		// Adjust default image by protocol if not manually set
 		if image == defaultImageHTTP {
@@ -340,7 +343,10 @@ func NewTapCommand(client kubernetes.Interface, config *rest.Config, viper *vipe
 		// Apply the Deployment configuration
 		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			dpl.Spec.Template.Spec.Containers = append([]v1.Container{sidecar}, dpl.Spec.Template.Spec.Containers...)
-			proxy.PatchDeployment(&dpl)
+			err := proxy.PatchDeployment(&dpl)
+			if err != nil {
+				return err
+			}
 			// set annotation on pod to know what pods are tapped
 			anns := dpl.Spec.Template.GetAnnotations()
 			if anns == nil {
@@ -572,7 +578,10 @@ func NewUntapCommand(client kubernetes.Interface, viper *viper.Viper) func(*cobr
 			}
 			deployment.Spec.Template.Spec.Containers = containersNoProxy
 
-			proxy.UnPatchDeployment(deployment)
+			err := proxy.UnPatchDeployment(deployment)
+			if err != nil {
+				return err
+			}
 
 			var volumes []v1.Volume
 			for _, v := range deployment.Spec.Template.Spec.Volumes {
